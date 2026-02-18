@@ -90,6 +90,35 @@ target_label_dict_live = {}
 img_ft, vid_ft = modules.globals.file_types
 
 
+def _get_gpu_status_text() -> str:
+    """Return a compact one-line GPU/provider status string for the status bar."""
+    parts = []
+    try:
+        import torch
+        if torch.cuda.is_available():
+            name = torch.cuda.get_device_properties(0).name
+            vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+            parts.append(f'GPU: {name} ({vram_gb:.1f}GB)')
+        else:
+            parts.append('GPU: N/A')
+    except Exception:
+        parts.append('GPU: unknown')
+
+    try:
+        import onnxruntime as ort
+        providers = ort.get_available_providers()
+        if 'TensorrtExecutionProvider' in providers:
+            parts.append('ORT: TRT+CUDA+CPU available')
+        elif 'CUDAExecutionProvider' in providers:
+            parts.append('ORT: CUDA+CPU available')
+        else:
+            parts.append('ORT: CPU only')
+    except Exception:
+        pass
+
+    return '   |   '.join(parts)
+
+
 def init(start: Callable[[], None], destroy: Callable[[], None], lang: str) -> ctk.CTk:
     global ROOT, PREVIEW, _
 
@@ -118,6 +147,7 @@ def save_switch_states():
         "mouth_mask": modules.globals.mouth_mask,
         "show_mouth_mask_box": modules.globals.show_mouth_mask_box,
         "virtual_cam": modules.globals.virtual_cam,
+        "side_by_side": modules.globals.side_by_side,
     }
     with open("switch_states.json", "w") as f:
         json.dump(switch_states, f)
@@ -144,6 +174,7 @@ def load_switch_states():
             "show_mouth_mask_box", False
         )
         modules.globals.virtual_cam = switch_states.get("virtual_cam", False)
+        modules.globals.side_by_side = switch_states.get("side_by_side", False)
     except FileNotFoundError:
         # If the file doesn't exist, use default values
         pass
@@ -480,6 +511,27 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
     virtual_cam_status_label = ctk.CTkLabel(root, text='Virtual Cam: Off', justify='left')
     virtual_cam_status_label.place(relx=0.6, rely=0.74, relwidth=0.35)
     # --- End Virtual Camera Toggle ---
+
+    # --- Side-by-Side Preview Toggle ---
+    side_by_side_value = ctk.BooleanVar(value=modules.globals.side_by_side)
+    side_by_side_switch = ctk.CTkSwitch(
+        root,
+        text=_('Side by Side'),
+        variable=side_by_side_value,
+        cursor='hand2',
+        command=lambda: (
+            setattr(modules.globals, 'side_by_side', side_by_side_value.get()),
+            save_switch_states(),
+        ),
+    )
+    side_by_side_switch.place(relx=0.1, rely=0.70)
+    # --- End Side-by-Side Preview Toggle ---
+
+    # --- GPU/Provider stats bar ---
+    gpu_status_text = _get_gpu_status_text()
+    gpu_status_label = ctk.CTkLabel(root, text=gpu_status_text, justify='center', font=ctk.CTkFont(size=11))
+    gpu_status_label.place(relx=0.05, rely=0.93, relwidth=0.9)
+    # --- End GPU/Provider stats bar ---
 
     # Status and link at the bottom
     global status_label
@@ -1017,13 +1069,17 @@ def _processing_thread_func(capture_queue, processed_queue, stop_event):
     when the output queue is full so the UI always gets the latest result.
 
     Uses DETECT_EVERY_N to skip expensive face detection on intermediate
-    frames, reusing cached face positions instead."""
+    frames, reusing cached face positions instead.
+
+    Queue items are (original_frame, processed_frame, fps) tuples so the
+    display loop can show side-by-side and overlay FPS without extra copies.
+    """
     frame_processors = get_frame_processors_modules(modules.globals.frame_processors)
     source_image = None
     prev_time = time.time()
     fps_update_interval = 0.5
     frame_count = 0
-    fps = 0
+    fps = 0.0
     proc_frame_index = 0
     cached_target_face = None  # cached single-face result
     cached_many_faces = None   # cached many-faces result
@@ -1034,12 +1090,14 @@ def _processing_thread_func(capture_queue, processed_queue, stop_event):
         except queue.Empty:
             continue
 
+        original_frame = frame.copy()  # keep original for side-by-side
         temp_frame = frame.copy()
         run_detection = (proc_frame_index % DETECT_EVERY_N == 0)
         proc_frame_index += 1
 
         if modules.globals.live_mirror:
             temp_frame = gpu_flip(temp_frame, 1)
+            original_frame = gpu_flip(original_frame, 1)
 
         if not modules.globals.map_faces:
             if source_image is None and modules.globals.source_path:
@@ -1085,7 +1143,7 @@ def _processing_thread_func(capture_queue, processed_queue, stop_event):
                 else:
                     temp_frame = frame_processor.process_frame_v2(temp_frame)
 
-        # Calculate and display FPS
+        # Calculate FPS
         current_time = time.time()
         frame_count += 1
         if current_time - prev_time >= fps_update_interval:
@@ -1104,16 +1162,17 @@ def _processing_thread_func(capture_queue, processed_queue, stop_event):
                 2,
             )
 
-        # Put processed frame into output queue, dropping old frames if full
+        # Put (original, processed, fps) tuple into output queue, dropping old frames if full
+        payload = (original_frame, temp_frame, fps)
         try:
-            processed_queue.put_nowait(temp_frame)
+            processed_queue.put_nowait(payload)
         except queue.Full:
             try:
                 processed_queue.get_nowait()
             except queue.Empty:
                 pass
             try:
-                processed_queue.put_nowait(temp_frame)
+                processed_queue.put_nowait(payload)
             except queue.Full:
                 pass
 
@@ -1166,9 +1225,12 @@ def create_webcam_preview(camera_index: int):
     proc_thread.start()
 
     # Main (UI) thread: pull processed frames and update the display
+    fps_label = ctk.CTkLabel(PREVIEW, text='', anchor='w')
+    fps_label.pack(side='bottom', fill='x', padx=4, pady=2)
+
     while not stop_event.is_set():
         try:
-            temp_frame = processed_queue.get(timeout=0.03)
+            original_frame, temp_frame, fps = processed_queue.get(timeout=0.03)
         except queue.Empty:
             ROOT.update()
             continue
@@ -1177,22 +1239,29 @@ def create_webcam_preview(camera_index: int):
         if modules.globals.virtual_cam and _virtual_cam.is_running:
             _virtual_cam.send_frame(temp_frame)
 
-        if modules.globals.live_resizable:
-            temp_frame = fit_image_to_size(
-                temp_frame, PREVIEW.winfo_width(), PREVIEW.winfo_height()
-            )
+        # Build display frame: side-by-side or single
+        if modules.globals.side_by_side:
+            # Ensure both frames have the same height
+            h1, w1 = original_frame.shape[:2]
+            h2, w2 = temp_frame.shape[:2]
+            if h1 != h2:
+                temp_frame = cv2.resize(temp_frame, (w2, h1))
+            display_frame = np.hstack([original_frame, temp_frame])
         else:
-            temp_frame = fit_image_to_size(
-                temp_frame, PREVIEW.winfo_width(), PREVIEW.winfo_height()
-            )
+            display_frame = temp_frame
 
-        image = gpu_cvt_color(temp_frame, cv2.COLOR_BGR2RGB)
+        preview_w = PREVIEW.winfo_width()
+        preview_h = max(PREVIEW.winfo_height() - 30, 100)  # leave room for fps_label
+        display_frame = fit_image_to_size(display_frame, preview_w, preview_h)
+
+        image = gpu_cvt_color(display_frame, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(image)
         image = ImageOps.contain(
-            image, (temp_frame.shape[1], temp_frame.shape[0]), Image.LANCZOS
+            image, (display_frame.shape[1], display_frame.shape[0]), Image.LANCZOS
         )
         image = ctk.CTkImage(image, size=image.size)
         preview_label.configure(image=image)
+        fps_label.configure(text=f'  FPS: {fps:.1f}   {"Side-by-Side" if modules.globals.side_by_side else ""}')
         ROOT.update()
 
         if PREVIEW.state() == "withdrawn":
