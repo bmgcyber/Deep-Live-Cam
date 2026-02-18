@@ -14,6 +14,7 @@ import numpy as np
 import modules.globals
 import modules.metadata
 from modules.virtual_cam import VirtualCamWriter
+from modules.face_tracker import FaceTracker
 from modules.face_analyser import (
     get_one_face,
     get_many_faces,
@@ -526,6 +527,35 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
     )
     side_by_side_switch.place(relx=0.1, rely=0.70)
     # --- End Side-by-Side Preview Toggle ---
+
+    # --- Temporal Smoothing Slider ---
+    smooth_label = ctk.CTkLabel(root, text='Smoothing:')
+    smooth_label.place(relx=0.15, rely=0.85, relwidth=0.2, relheight=0.05)
+
+    smooth_var = ctk.DoubleVar(value=1.0 - modules.globals.smooth_alpha)
+
+    def on_smooth_change(value: float):
+        # slider 0=no smooth, 1=max smooth  => alpha = 1 - value
+        modules.globals.smooth_alpha = max(0.05, 1.0 - float(value))
+        pct = int(float(value) * 100)
+        update_status(f'Smoothing: {pct}%')
+
+    smooth_slider = ctk.CTkSlider(
+        root,
+        from_=0.0,
+        to=1.0,
+        variable=smooth_var,
+        command=on_smooth_change,
+        fg_color='#E0E0E0',
+        progress_color='#007BFF',
+        button_color='#FFFFFF',
+        button_hover_color='#CCCCCC',
+        height=5,
+        border_width=1,
+        corner_radius=3,
+    )
+    smooth_slider.place(relx=0.35, rely=0.87, relwidth=0.5, relheight=0.02)
+    # --- End Temporal Smoothing Slider ---
 
     # --- GPU/Provider stats bar ---
     gpu_status_text = _get_gpu_status_text()
@@ -1083,6 +1113,8 @@ def _processing_thread_func(capture_queue, processed_queue, stop_event):
     proc_frame_index = 0
     cached_target_face = None  # cached single-face result
     cached_many_faces = None   # cached many-faces result
+    _tracker_single = FaceTracker()
+    _tracker_many = FaceTracker()
 
     while not stop_event.is_set():
         try:
@@ -1103,14 +1135,20 @@ def _processing_thread_func(capture_queue, processed_queue, stop_event):
             if source_image is None and modules.globals.source_path:
                 source_image = get_one_face(cv2.imread(modules.globals.source_path))
 
-            # Update face detection cache on detection frames
+            # Update face detection cache on detection frames, then smooth via tracker
             if run_detection or (cached_target_face is None and cached_many_faces is None):
                 if modules.globals.many_faces:
-                    cached_many_faces = get_many_faces(temp_frame)
+                    raw_many = get_many_faces(temp_frame)
+                    cached_many_faces = _tracker_many.update(raw_many)
                     cached_target_face = None
                 else:
-                    cached_target_face = get_one_face(temp_frame)
+                    raw_single = get_one_face(temp_frame)
+                    cached_target_face = _tracker_single.update_single(raw_single)
                     cached_many_faces = None
+            else:
+                # Non-detection frame: still run tracker update with None to advance grace counter
+                # (only needed if previously no face was found - otherwise keep cache)
+                pass
 
             for frame_processor in frame_processors:
                 if frame_processor.NAME == "DLC.FACE-ENHANCER":
