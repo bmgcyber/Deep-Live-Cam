@@ -60,6 +60,9 @@ virtual_cam: bool = False                      # Stream processed frames to a vi
 # UI Configuration (Phase 3)
 side_by_side: bool = False                     # Show original and swapped frames side-by-side in preview
 
+# Temporal Smoothing Configuration (Phase 4)
+smooth_alpha: float = 0.5                      # EMA weight for new detections (0=max smooth, 1=no smooth)
+
 # Face Processor UI Toggles (Example)
 fp_ui: Dict[str, bool] = {"face_enhancer": False}
 
