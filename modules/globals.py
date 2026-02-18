@@ -54,6 +54,9 @@ trt_fp16: bool = True                          # Enable FP16 precision (optimal 
 trt_cache_dir: str = "trt_cache"               # Where to store compiled TRT engines
 trt_workspace_gb: float = 4.0                  # TRT optimization workspace size in GB
 
+# Virtual Camera Configuration (Phase 2)
+virtual_cam: bool = False                      # Stream processed frames to a virtual webcam device
+
 # Face Processor UI Toggles (Example)
 fp_ui: Dict[str, bool] = {"face_enhancer": False}
 
