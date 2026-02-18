@@ -57,6 +57,9 @@ trt_workspace_gb: float = 4.0                  # TRT optimization workspace size
 # Virtual Camera Configuration (Phase 2)
 virtual_cam: bool = False                      # Stream processed frames to a virtual webcam device
 
+# UI Configuration (Phase 3)
+side_by_side: bool = False                     # Show original and swapped frames side-by-side in preview
+
 # Face Processor UI Toggles (Example)
 fp_ui: Dict[str, bool] = {"face_enhancer": False}
 
