@@ -55,6 +55,7 @@ def parse_args() -> None:
     program.add_argument('--trt-fp16', help='enable TensorRT FP16 mode (faster, same quality on 4070 SUPER)', dest='trt_fp16', action='store_true', default=True)
     program.add_argument('--trt-cache-dir', help='directory for TensorRT engine cache files', dest='trt_cache_dir', default=os.path.join(os.path.dirname(__file__), '..', 'trt_cache'))
     program.add_argument('--trt-workspace-gb', help='TensorRT workspace size in GB', dest='trt_workspace_gb', type=float, default=4.0)
+    program.add_argument('--virtual-cam', help='stream processed frames to a virtual webcam (requires OBS Virtual Camera on Windows)', dest='virtual_cam', action='store_true', default=False)
     program.add_argument('--execution-threads', help='number of execution threads', dest='execution_threads', type=int, default=suggest_execution_threads())
     program.add_argument('-v', '--version', action='version', version=f'{modules.metadata.name} {modules.metadata.version}')
 
@@ -89,6 +90,7 @@ def parse_args() -> None:
     modules.globals.trt_fp16 = args.trt_fp16
     modules.globals.trt_cache_dir = os.path.abspath(args.trt_cache_dir)
     modules.globals.trt_workspace_gb = args.trt_workspace_gb
+    modules.globals.virtual_cam = args.virtual_cam
 
     #for ENHANCER tumbler:
     if 'face_enhancer' in args.frame_processor:
