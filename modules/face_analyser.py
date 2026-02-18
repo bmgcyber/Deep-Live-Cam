@@ -3,6 +3,7 @@ import shutil
 from typing import Any
 import insightface
 import threading
+import time
 
 import cv2
 import numpy as np
@@ -11,7 +12,10 @@ from tqdm import tqdm
 from modules.typing import Frame
 from modules.cluster_analysis import find_cluster_centroids, find_closest_centroid
 from modules.utilities import get_temp_directory_path, create_temp, extract_frames, clean_temp, get_temp_frame_paths
+from modules.logger import get_logger
 from pathlib import Path
+
+_log = get_logger(__name__)
 
 FACE_ANALYSER = None
 FACE_ANALYSER_LOCK = threading.Lock()
@@ -25,27 +29,42 @@ def get_face_analyser() -> Any:
         with FACE_ANALYSER_LOCK:
             # Double-check after acquiring lock
             if FACE_ANALYSER is None:
+                _log.info('Initializing InsightFace FaceAnalysis (buffalo_l) with providers: %s',
+                          modules.globals.execution_providers)
+                t0 = time.perf_counter()
                 FACE_ANALYSER = insightface.app.FaceAnalysis(
                     name='buffalo_l',
                     providers=modules.globals.execution_providers,
                     allowed_modules=['detection', 'recognition']
                 )
                 FACE_ANALYSER.prepare(ctx_id=0, det_size=(320, 320))
+                _log.info('FaceAnalysis ready in %.2fs', time.perf_counter() - t0)
     return FACE_ANALYSER
 
 
 def get_one_face(frame: Frame) -> Any:
+    t0 = time.perf_counter()
     face = get_face_analyser().get(frame)
+    elapsed = time.perf_counter() - t0
     try:
-        return min(face, key=lambda x: x.bbox[0])
+        result = min(face, key=lambda x: x.bbox[0])
+        _log.debug('get_one_face: found 1 face in %.1fms', elapsed * 1000)
+        return result
     except ValueError:
+        _log.debug('get_one_face: no face detected in %.1fms', elapsed * 1000)
         return None
 
 
 def get_many_faces(frame: Frame) -> Any:
+    t0 = time.perf_counter()
     try:
-        return get_face_analyser().get(frame)
+        result = get_face_analyser().get(frame)
+        elapsed = time.perf_counter() - t0
+        count = len(result) if result else 0
+        _log.debug('get_many_faces: found %d face(s) in %.1fms', count, elapsed * 1000)
+        return result
     except IndexError:
+        _log.debug('get_many_faces: IndexError during detection')
         return None
 
 def has_valid_map() -> bool:

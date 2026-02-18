@@ -21,6 +21,9 @@ from __future__ import annotations
 import cv2
 import numpy as np
 from typing import Tuple, Optional
+from modules.logger import get_logger
+
+_log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # CUDA availability detection (evaluated once at import time)
@@ -36,7 +39,7 @@ try:
     _has_cvt = hasattr(cv2.cuda, "cvtColor")
     if _has_gauss and _has_resize and _has_cvt:
         CUDA_AVAILABLE = True
-        print("[gpu_processing] OpenCV CUDA support detected – GPU-accelerated processing enabled.")
+        _log.info("OpenCV CUDA support detected – GPU-accelerated processing enabled.")
     else:
         missing = []
         if not _has_gauss:
@@ -45,9 +48,9 @@ try:
             missing.append("resize")
         if not _has_cvt:
             missing.append("cvtColor")
-        print(f"[gpu_processing] cv2.cuda.GpuMat exists but missing: {', '.join(missing)} – falling back to CPU.")
+        _log.warning("cv2.cuda.GpuMat exists but missing: %s – falling back to CPU.", ', '.join(missing))
 except Exception:
-    print("[gpu_processing] OpenCV CUDA not available – using CPU fallback for all operations.")
+    _log.info("OpenCV CUDA not available – using CPU fallback for all image processing operations.")
 
 
 # ---------------------------------------------------------------------------
