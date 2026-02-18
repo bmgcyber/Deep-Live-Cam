@@ -13,6 +13,7 @@ import threading
 import numpy as np
 import modules.globals
 import modules.metadata
+from modules.virtual_cam import VirtualCamWriter
 from modules.face_analyser import (
     get_one_face,
     get_many_faces,
@@ -43,6 +44,10 @@ POPUP = None
 POPUP_LIVE = None
 ROOT_HEIGHT = 800
 ROOT_WIDTH = 600
+
+# Virtual camera singleton — lives for the entire session
+_virtual_cam: VirtualCamWriter = VirtualCamWriter()
+virtual_cam_status_label = None
 
 PREVIEW = None
 PREVIEW_MAX_HEIGHT = 700
@@ -112,6 +117,7 @@ def save_switch_states():
         "show_fps": modules.globals.show_fps,
         "mouth_mask": modules.globals.mouth_mask,
         "show_mouth_mask_box": modules.globals.show_mouth_mask_box,
+        "virtual_cam": modules.globals.virtual_cam,
     }
     with open("switch_states.json", "w") as f:
         json.dump(switch_states, f)
@@ -137,13 +143,14 @@ def load_switch_states():
         modules.globals.show_mouth_mask_box = switch_states.get(
             "show_mouth_mask_box", False
         )
+        modules.globals.virtual_cam = switch_states.get("virtual_cam", False)
     except FileNotFoundError:
         # If the file doesn't exist, use default values
         pass
 
 
 def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.CTk:
-    global source_label, target_label, status_label, show_fps_switch
+    global source_label, target_label, status_label, show_fps_switch, virtual_cam_status_label
 
     load_switch_states()
 
@@ -449,6 +456,30 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
         corner_radius=3,
     )
     sharpness_slider.place(relx=0.35, rely=0.82, relwidth=0.5, relheight=0.02)
+
+    # --- Virtual Camera Toggle ---
+    def on_virtual_cam_toggle():
+        enabled = virtual_cam_value.get()
+        modules.globals.virtual_cam = enabled
+        save_switch_states()
+        if not enabled and _virtual_cam.is_running:
+            _virtual_cam.stop()
+            if virtual_cam_status_label:
+                virtual_cam_status_label.configure(text='Virtual Cam: Off')
+
+    virtual_cam_value = ctk.BooleanVar(value=modules.globals.virtual_cam)
+    virtual_cam_switch = ctk.CTkSwitch(
+        root,
+        text=_('Virtual Cam'),
+        variable=virtual_cam_value,
+        cursor='hand2',
+        command=on_virtual_cam_toggle,
+    )
+    virtual_cam_switch.place(relx=0.6, rely=0.70)
+
+    virtual_cam_status_label = ctk.CTkLabel(root, text='Virtual Cam: Off', justify='left')
+    virtual_cam_status_label.place(relx=0.6, rely=0.74, relwidth=0.35)
+    # --- End Virtual Camera Toggle ---
 
     # Status and link at the bottom
     global status_label
@@ -1098,6 +1129,20 @@ def create_webcam_preview(camera_index: int):
     preview_label.configure(width=PREVIEW_DEFAULT_WIDTH, height=PREVIEW_DEFAULT_HEIGHT)
     PREVIEW.deiconify()
 
+    # Start virtual camera if enabled
+    if modules.globals.virtual_cam:
+        ok = _virtual_cam.start(
+            width=PREVIEW_DEFAULT_WIDTH,
+            height=PREVIEW_DEFAULT_HEIGHT,
+            fps=30.0,
+        )
+        if ok and virtual_cam_status_label:
+            virtual_cam_status_label.configure(
+                text=f'Virtual Cam: {_virtual_cam.device}'
+            )
+        elif not ok and virtual_cam_status_label:
+            virtual_cam_status_label.configure(text='Virtual Cam: Failed (OBS required)')
+
     # Queues for decoupling capture from processing and processing from display.
     # Small maxsize ensures we always work on recent frames and drop stale ones.
     capture_queue = queue.Queue(maxsize=2)
@@ -1128,6 +1173,10 @@ def create_webcam_preview(camera_index: int):
             ROOT.update()
             continue
 
+        # Send to virtual camera before any display resizing
+        if modules.globals.virtual_cam and _virtual_cam.is_running:
+            _virtual_cam.send_frame(temp_frame)
+
         if modules.globals.live_resizable:
             temp_frame = fit_image_to_size(
                 temp_frame, PREVIEW.winfo_width(), PREVIEW.winfo_height()
@@ -1155,6 +1204,12 @@ def create_webcam_preview(camera_index: int):
     proc_thread.join(timeout=2.0)
     cap.release()
     PREVIEW.withdraw()
+
+    # Stop virtual camera cleanly
+    if _virtual_cam.is_running:
+        _virtual_cam.stop()
+        if virtual_cam_status_label:
+            virtual_cam_status_label.configure(text='Virtual Cam: Off')
 
 
 def create_source_target_popup_for_webcam(
