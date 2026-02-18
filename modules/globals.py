@@ -49,6 +49,11 @@ execution_threads: int | None = None # Number of threads for CPU execution
 headless: bool | None = None         # Run without UI?
 log_level: str = "error"             # Logging level (e.g., 'debug', 'info', 'warning', 'error')
 
+# TensorRT Configuration (Phase 1)
+trt_fp16: bool = True                          # Enable FP16 precision (optimal for RTX 4070 SUPER)
+trt_cache_dir: str = "trt_cache"               # Where to store compiled TRT engines
+trt_workspace_gb: float = 4.0                  # TRT optimization workspace size in GB
+
 # Face Processor UI Toggles (Example)
 fp_ui: Dict[str, bool] = {"face_enhancer": False}
 
