@@ -147,8 +147,38 @@ def check_cuda_toolkits() -> None:
         log.warning('No CUDA toolkit directories found')
 
 
+def _try_load_session(model_path: str, providers: list):
+    """Try to load an ORT session. Returns (session, active_provider) or (None, None) on failure."""
+    import onnxruntime as ort
+    import warnings
+    sess_opts = ort.SessionOptions()
+    sess_opts.log_severity_level = 4  # silent
+    try:
+        # preload_dlls() auto-resolves bundled CUDA/cuDNN paths (ORT 1.21+)
+        if hasattr(ort, 'preload_dlls'):
+            try:
+                ort.preload_dlls()
+            except Exception:
+                pass
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            session = ort.InferenceSession(model_path, sess_options=sess_opts, providers=providers)
+        active = session.get_providers()[0]
+        # Check it actually used the requested provider (ORT may silently fallback)
+        if active == 'CPUExecutionProvider' and providers[0] != 'CPUExecutionProvider':
+            log.debug('Session silently fell back to CPU from %s', providers[0])
+        return session, active
+    except Exception as e:
+        log.debug('Session load failed with providers %s: %s', providers, e)
+        return None, None
+
+
 def benchmark_ort_inference() -> None:
-    """Quick ORT inference speed test using a dummy input on inswapper shape."""
+    """Quick ORT inference speed test using a dummy input on inswapper shape.
+
+    Tries each provider in order: TensorRT → CUDA → CPU, benchmarking each
+    that successfully loads so you get a full picture of what's usable.
+    """
     log.info('--- ORT Inference Benchmark ---')
     import onnxruntime as ort
     import numpy as np
@@ -161,59 +191,66 @@ def benchmark_ort_inference() -> None:
         log.warning('%s No inswapper model found, skipping ORT benchmark', WARN)
         return
 
-    providers = ort.get_available_providers()
-    provider_order = []
-    if 'TensorrtExecutionProvider' in providers:
-        provider_order.append('TensorrtExecutionProvider')
-    if 'CUDAExecutionProvider' in providers:
-        provider_order.append('CUDAExecutionProvider')
-    provider_order.append('CPUExecutionProvider')
+    available = ort.get_available_providers()
+    # Try each provider independently (don't chain TRT+CUDA — ORT falls back to CPU when TRT DLL missing)
+    provider_chains_to_try = []
+    if 'TensorrtExecutionProvider' in available:
+        provider_chains_to_try.append(['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'])
+    if 'CUDAExecutionProvider' in available:
+        provider_chains_to_try.append(['CUDAExecutionProvider', 'CPUExecutionProvider'])
+    provider_chains_to_try.append(['CPUExecutionProvider'])
 
     log.info('Loading model: %s', os.path.basename(model_path))
-    log.info('Provider chain: %s', provider_order)
 
-    try:
-        sess_opts = ort.SessionOptions()
-        sess_opts.log_severity_level = 3  # suppress ORT warnings
+    n_runs = 30
+    results = {}
 
-        with Timer('Model load', log):
-            session = ort.InferenceSession(model_path, sess_options=sess_opts, providers=provider_order)
+    for provider_chain in provider_chains_to_try:
+        label = provider_chain[0]
+        if label in results:
+            continue  # already benchmarked this one
+        log.info('Trying provider: %s ...', label)
+        session, active = _try_load_session(model_path, provider_chain)
+        if session is None:
+            log.warning('  %s %s: failed to load session', FAIL, label)
+            continue
+        actual_label = active
+        log.info('  Loaded. Active provider: %s', actual_label)
 
-        active_provider = session.get_providers()[0]
-        log.info('Active provider: %s', active_provider)
-
-        # Get input metadata
         inputs = session.get_inputs()
-        for inp in inputs:
-            log.debug('  Input: %s  shape=%s  dtype=%s', inp.name, inp.shape, inp.type)
+        dummy_inputs = {
+            inp.name: np.random.rand(*[d if isinstance(d, int) else 1 for d in inp.shape]).astype(np.float32)
+            for inp in inputs
+        }
 
         # Warm up
-        log.info('Warming up (5 runs)...')
-        dummy_inputs = {inp.name: np.random.rand(*[d if isinstance(d, int) else 1 for d in inp.shape]).astype(np.float32)
-                        for inp in inputs}
-        for _ in range(5):
-            session.run(None, dummy_inputs)
+        try:
+            for _ in range(3):
+                session.run(None, dummy_inputs)
 
-        # Benchmark
-        n_runs = 50
-        log.info('Benchmarking %d inference runs...', n_runs)
-        times = []
-        for i in range(n_runs):
-            t0 = time.perf_counter()
-            session.run(None, dummy_inputs)
-            times.append(time.perf_counter() - t0)
+            # Benchmark
+            times = []
+            for _ in range(n_runs):
+                t0 = time.perf_counter()
+                session.run(None, dummy_inputs)
+                times.append(time.perf_counter() - t0)
 
-        avg_ms = (sum(times) / len(times)) * 1000
-        min_ms = min(times) * 1000
-        max_ms = max(times) * 1000
-        fps = 1000 / avg_ms
+            avg_ms = (sum(times) / len(times)) * 1000
+            fps = 1000 / avg_ms
+            results[actual_label] = (avg_ms, fps)
+            log.info('  %s avg: %.1f ms -> %.1f FPS theoretical max', actual_label, avg_ms, fps)
+        except Exception as e:
+            log.warning('  Benchmark run failed for %s: %s', label, e)
 
-        log.info('Results on %s:', active_provider)
-        log.info('  avg: %.2f ms  min: %.2f ms  max: %.2f ms', avg_ms, min_ms, max_ms)
-        log.info('  theoretical max FPS: %.1f', fps)
+    log.info('--- Benchmark Summary ---')
+    for provider, (avg_ms, fps) in results.items():
+        log.info('  %-35s  avg %.1f ms  =  %.1f FPS', provider, avg_ms, fps)
+    if not results:
+        log.warning('No providers benchmarked successfully')
 
-    except Exception as e:
-        log.error('ORT benchmark failed: %s', e, exc_info=True)
+    # Placeholder for the rest of the original function body
+    return
+
 
 
 def main():

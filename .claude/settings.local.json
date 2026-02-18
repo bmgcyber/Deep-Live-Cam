@@ -9,7 +9,12 @@
       "Bash(git remote add:*)",
       "Bash(git push:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git config:*)",
+      "Bash(python -c:*)",
+      "Bash(\"C:/Python312/python.exe\" -c:*)",
+      "Bash(\"C:/Python312/python.exe\" -m pip install:*)",
+      "Bash(\"C:/Python312/python.exe\":*)"
     ]
   }
 }

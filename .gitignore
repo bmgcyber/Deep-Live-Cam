@@ -25,3 +25,9 @@ models/DMDNet.pth
 faceswap/
 .vscode/
 switch_states.json
+
+# TensorRT compiled engines (GPU-specific, large, regenerated automatically)
+trt_cache/
+
+# Log files
+logs/
