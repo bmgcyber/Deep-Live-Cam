@@ -15,6 +15,7 @@ import modules.globals
 import modules.metadata
 from modules.virtual_cam import VirtualCamWriter
 from modules.face_tracker import FaceTracker
+from modules.hotkeys import hotkey_manager
 from modules.face_analyser import (
     get_one_face,
     get_many_faces,
@@ -49,6 +50,9 @@ ROOT_WIDTH = 600
 # Virtual camera singleton — lives for the entire session
 _virtual_cam: VirtualCamWriter = VirtualCamWriter()
 virtual_cam_status_label = None
+
+# Latest processed frame — updated by preview loop for screenshot hotkey
+_latest_processed_frame = None
 
 PREVIEW = None
 PREVIEW_MAX_HEIGHT = 700
@@ -578,6 +582,37 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
     donate_label.bind(
         "<Button>", lambda event: webbrowser.open("https://deeplivecam.net")
     )
+
+    # Hotkey reference tooltip — show/hide with mouse hover on a small label
+    hotkey_text = (
+        'Hotkeys (during Live preview):\n'
+        '  F1  Toggle face swap on/off\n'
+        '  F2  Toggle virtual cam\n'
+        '  F3  Toggle side-by-side\n'
+        '  F4  Toggle face enhancer\n'
+        '  F5  Screenshot\n'
+        '  F8  Toggle FPS overlay\n'
+        '  Esc Stop preview\n'
+        '  +/- Adjust opacity'
+    )
+    hotkey_hint_label = ctk.CTkLabel(root, text='[Hotkeys?]', cursor='hand2', font=ctk.CTkFont(size=10))
+    hotkey_hint_label.place(relx=0.82, rely=0.97, relwidth=0.15)
+
+    hotkey_popup = None
+
+    def _show_hotkeys(event):
+        nonlocal hotkey_popup
+        if hotkey_popup and hotkey_popup.winfo_exists():
+            return
+        hotkey_popup = ctk.CTkToplevel(root)
+        hotkey_popup.title('Hotkeys')
+        hotkey_popup.geometry('240x200')
+        hotkey_popup.resizable(False, False)
+        lbl = ctk.CTkLabel(hotkey_popup, text=hotkey_text, justify='left', anchor='w', font=ctk.CTkFont(size=11))
+        lbl.pack(fill='both', expand=True, padx=10, pady=10)
+        hotkey_popup.bind('<Escape>', lambda e: hotkey_popup.destroy())
+
+    hotkey_hint_label.bind('<Button-1>', _show_hotkeys)
 
     return root
 
@@ -1216,7 +1251,7 @@ def _processing_thread_func(capture_queue, processed_queue, stop_event):
 
 
 def create_webcam_preview(camera_index: int):
-    global preview_label, PREVIEW
+    global preview_label, PREVIEW, _latest_processed_frame
 
     cap = VideoCapturer(camera_index)
     if not cap.start(PREVIEW_DEFAULT_WIDTH, PREVIEW_DEFAULT_HEIGHT, 60):
@@ -1246,6 +1281,25 @@ def create_webcam_preview(camera_index: int):
     processed_queue = queue.Queue(maxsize=2)
     stop_event = threading.Event()
 
+    # Wire hotkey manager for this preview session
+    def _screenshot_cb():
+        import os
+        frame = _latest_processed_frame
+        if frame is None:
+            return None
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        path = os.path.join(os.getcwd(), f'screenshot_{ts}.png')
+        try:
+            cv2.imwrite(path, frame)
+            return path
+        except Exception as e:
+            return None
+
+    hotkey_manager.screenshot_callback = _screenshot_cb
+    hotkey_manager.stop_callback = lambda: stop_event.set()
+    hotkey_manager.status_callback = update_status
+    hotkey_manager.start()
+
     # Start capture thread
     cap_thread = threading.Thread(
         target=_capture_thread_func,
@@ -1272,6 +1326,9 @@ def create_webcam_preview(camera_index: int):
         except queue.Empty:
             ROOT.update()
             continue
+
+        # Keep latest frame for screenshot hotkey
+        _latest_processed_frame = temp_frame
 
         # Send to virtual camera before any display resizing
         if modules.globals.virtual_cam and _virtual_cam.is_running:
@@ -1311,6 +1368,9 @@ def create_webcam_preview(camera_index: int):
     proc_thread.join(timeout=2.0)
     cap.release()
     PREVIEW.withdraw()
+
+    # Stop hotkey listener
+    hotkey_manager.stop()
 
     # Stop virtual camera cleanly
     if _virtual_cam.is_running:
