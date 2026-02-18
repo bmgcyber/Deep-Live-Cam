@@ -16,9 +16,13 @@ from modules.utilities import (
 )
 from modules.cluster_analysis import find_closest_centroid
 from modules.gpu_processing import gpu_gaussian_blur, gpu_sharpen, gpu_add_weighted, gpu_resize, gpu_cvt_color
+from modules.logger import get_logger, Timer
+from modules.trt_provider import build_provider_chain, log_provider_chain_result
 import os
 from collections import deque
 import time
+
+_log = get_logger(__name__)
 
 FACE_SWAPPER = None
 THREAD_LOCK = threading.Lock()
@@ -75,38 +79,59 @@ def get_face_swapper() -> Any:
 
     with THREAD_LOCK:
         if FACE_SWAPPER is None:
-            model_name = "inswapper_128.onnx"
-            if "CUDAExecutionProvider" in modules.globals.execution_providers:
-                model_name = "inswapper_128_fp16.onnx"
+            # Use FP16 model when any GPU provider is active (CUDA or TRT)
+            gpu_providers = {'CUDAExecutionProvider', 'TensorrtExecutionProvider', 'CoreMLExecutionProvider', 'DmlExecutionProvider'}
+            use_fp16 = bool(set(modules.globals.execution_providers) & gpu_providers)
+            model_name = "inswapper_128_fp16.onnx" if use_fp16 else "inswapper_128.onnx"
             model_path = os.path.join(models_dir, model_name)
-            update_status(f"Loading face swapper model from: {model_path}", NAME)
+
+            update_status(f"Loading face swapper: {model_name}", NAME)
+            _log.info('Face swapper model: %s', model_path)
+            _log.info('use_fp16=%s  execution_providers=%s', use_fp16, modules.globals.execution_providers)
+
             try:
-                # Optimized provider configuration for Apple Silicon
-                providers_config = []
-                for p in modules.globals.execution_providers:
-                    if p == "CoreMLExecutionProvider" and IS_APPLE_SILICON:
-                        # Enhanced CoreML configuration for M1-M5
-                        providers_config.append((
-                            "CoreMLExecutionProvider",
-                            {
-                                "ModelFormat": "MLProgram",
-                                "MLComputeUnits": "ALL",  # Use Neural Engine + GPU + CPU
-                                "SpecializationStrategy": "FastPrediction",
-                                "AllowLowPrecisionAccumulationOnGPU": 1,
-                                "EnableOnSubgraphs": 1,
-                                "RequireStaticShapes": 0,
-                                "MaximumCacheSize": 1024 * 1024 * 512,  # 512MB cache
-                            }
-                        ))
-                    else:
-                        providers_config.append(p)
-                
-                FACE_SWAPPER = insightface.model_zoo.get_model(
-                    model_path,
-                    providers=providers_config,
-                )
-                update_status("Face swapper model loaded successfully.", NAME)
+                if IS_APPLE_SILICON:
+                    # Apple Silicon CoreML configuration
+                    providers_config = []
+                    for p in modules.globals.execution_providers:
+                        if p == "CoreMLExecutionProvider":
+                            providers_config.append((
+                                "CoreMLExecutionProvider",
+                                {
+                                    "ModelFormat": "MLProgram",
+                                    "MLComputeUnits": "ALL",
+                                    "SpecializationStrategy": "FastPrediction",
+                                    "AllowLowPrecisionAccumulationOnGPU": 1,
+                                    "EnableOnSubgraphs": 1,
+                                    "RequireStaticShapes": 0,
+                                    "MaximumCacheSize": 1024 * 1024 * 512,
+                                }
+                            ))
+                        else:
+                            providers_config.append(p)
+                    _log.info('Using Apple Silicon provider config: %s', providers_config)
+                else:
+                    # Windows/Linux: use TRT/CUDA/CPU chain with proper options
+                    providers_config = build_provider_chain()
+                    _log.info('Using provider chain from trt_provider: %s',
+                              [p[0] if isinstance(p, tuple) else p for p in providers_config])
+
+                with Timer('Face swapper model load', _log):
+                    FACE_SWAPPER = insightface.model_zoo.get_model(
+                        model_path,
+                        providers=providers_config,
+                    )
+
+                # insightface wraps ORT session; try to get actual provider
+                try:
+                    actual_providers = FACE_SWAPPER.session.get_providers()
+                    log_provider_chain_result(actual_providers)
+                    update_status(f"Face swapper loaded on: {actual_providers[0]}", NAME)
+                except Exception:
+                    update_status("Face swapper model loaded successfully.", NAME)
+
             except Exception as e:
+                _log.error('Error loading face swapper model: %s', e, exc_info=True)
                 update_status(f"Error loading face swapper model: {e}", NAME)
                 FACE_SWAPPER = None
                 return None
@@ -115,6 +140,7 @@ def get_face_swapper() -> Any:
 
 def swap_face(source_face: Face, target_face: Face, temp_frame: Frame) -> Frame:
     """Optimized face swapping with better memory management and performance."""
+    t_swap_start = time.perf_counter()
     face_swapper = get_face_swapper()
     if face_swapper is None:
         update_status("Face swapper model not loaded or failed to load. Skipping swap.", NAME)
@@ -242,6 +268,8 @@ def swap_face(source_face: Face, target_face: Face, temp_frame: Frame) -> Frame:
     # Ensure final frame is uint8 after blending (addWeighted should preserve it, but belt-and-suspenders)
     final_swapped_frame = final_swapped_frame.astype(np.uint8)
 
+    t_swap_total = time.perf_counter() - t_swap_start
+    _log.debug('swap_face total: %.1fms', t_swap_total * 1000)
     return final_swapped_frame
 
 
